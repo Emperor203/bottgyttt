@@ -6,7 +6,6 @@ import asyncio
 import aiohttp
 import aiofiles
 import subprocess
-import yt_dlp
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -87,44 +86,96 @@ def compress_or_split_video(filepath: str) -> list[str]:
 
     return [filepath]
 
-async def download_cobalt_universal(url: str, session: aiohttp.ClientSession) -> dict | None:
-    """
-    Универсальный загрузчик Cobalt (YouTube, TikTok, Instagram, Twitter)
-    """
-    instances = [
-        "https://api.cobalt.tools",
-        "https://cobalt.api.scub3d.com",
-        "https://cobalt-api.kwiatekm.tokyo",
-        "https://co.wuk.sh/api/json"
-    ]
-    for inst in instances:
-        try:
-            payload = {
-                "url": url,
-                "videoQuality": "720",
-                "filenamePattern": "basic"
-            }
-            target_endpoint = inst if inst.endswith("/api/json") else f"{inst}/"
-            async with session.post(target_endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    direct_url = data.get("url")
-                    if direct_url:
-                        file_id = str(uuid.uuid4())
-                        filepath = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
-                        async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=60)) as v_resp:
-                            if v_resp.status == 200:
-                                async with aiofiles.open(filepath, 'wb') as f:
-                                    await f.write(await v_resp.read())
-                                return {
-                                    'files': compress_or_split_video(filepath),
-                                    'title': 'Downloaded Video',
-                                    'duration': 0
-                                }
-        except Exception:
-            continue
+def extract_youtube_id(url: str) -> str:
+    match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})', url)
+    if match:
+        return match.group(1)
+    return url
+
+# ================= 1. Y2MATE CLOUD API =================
+async def download_y2mate(video_url: str, session: aiohttp.ClientSession) -> dict | None:
+    try:
+        init_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        data = {
+            "k_query": video_url,
+            "k_page": "home",
+            "hl": "en",
+            "q_auto": 0
+        }
+        async with session.post(init_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                res = await resp.json()
+                if res.get("status") == "ok":
+                    title = res.get("title", "YouTube Video")
+                    v_id = res.get("vid")
+                    links = res.get("links", {}).get("mp4", {})
+                    
+                    # Ищем подходящее качество (720p, 480p, 360p, auto)
+                    k_key = None
+                    for key in ["auto", "136", "18", "135", "134", "133"]:
+                        if key in links:
+                            k_key = links[key].get("k")
+                            break
+                    if not k_key and links:
+                        k_key = list(links.values())[0].get("k")
+
+                    if k_key and v_id:
+                        conv_url = "https://www.y2mate.com/mates/convertV2/index"
+                        conv_data = {"vid": v_id, "k": k_key}
+                        async with session.post(conv_url, data=conv_data, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as c_resp:
+                            if c_resp.status == 200:
+                                c_res = await c_resp.json()
+                                if c_res.get("status") == "ok":
+                                    d_link = c_res.get("dlink")
+                                    if d_link:
+                                        file_id = str(uuid.uuid4())
+                                        filepath = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
+                                        async with session.get(d_link, timeout=aiohttp.ClientTimeout(total=60)) as dl_resp:
+                                            if dl_resp.status == 200:
+                                                async with aiofiles.open(filepath, 'wb') as f:
+                                                    await f.write(await dl_resp.read())
+                                                return {'files': compress_or_split_video(filepath), 'title': title, 'duration': 0}
+    except Exception as e:
+        print(f"Y2Mate ошибка: {e}")
     return None
 
+# ================= 2. SSYOUTUBE API =================
+async def download_ssyoutube(video_url: str, session: aiohttp.ClientSession) -> dict | None:
+    try:
+        api_url = "https://api-wh.sf-helper.com/api/convert"
+        payload = {"url": video_url}
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                title = data.get("meta", {}).get("title", "YouTube Video")
+                urls = data.get("url", [])
+                target_url = None
+                for u in urls:
+                    if u.get("ext") == "mp4" and u.get("download_url"):
+                        target_url = u.get("download_url")
+                        break
+                if not target_url and urls:
+                    target_url = urls[0].get("download_url")
+
+                if target_url:
+                    file_id = str(uuid.uuid4())
+                    filepath = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
+                    async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=60)) as dl_resp:
+                        if dl_resp.status == 200:
+                            async with aiofiles.open(filepath, 'wb') as f:
+                                await f.write(await dl_resp.read())
+                            return {'files': compress_or_split_video(filepath), 'title': title, 'duration': 0}
+    except Exception as e:
+        print(f"SSYouTube ошибка: {e}")
+    return None
+
+# ================= 3. TIKTOK API =================
 async def download_tiktok_direct(url: str, session: aiohttp.ClientSession) -> dict | None:
     try:
         tikwm_url = f"https://www.tikwm.com/api/?url={url}&hd=1"
@@ -147,72 +198,32 @@ async def download_tiktok_direct(url: str, session: aiohttp.ClientSession) -> di
         print(f"TikWM ошибка: {e}")
     return None
 
+# ================= ГЛАВНЫЙ СКАЧИВАТЕЛЬ =================
 async def download_media(url: str) -> dict:
     headers = {
         'Accept': 'application/json, text/plain, */*',
-        'Content-Type': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     }
     timeout = aiohttp.ClientTimeout(total=90)
     connector = aiohttp.TCPConnector(ssl=False)
 
     async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
-        # 1. TikTok
+        # ТИКТОК
         if 'tiktok.com' in url:
             tt_res = await download_tiktok_direct(url, session)
             if tt_res:
                 return tt_res
 
-        # 2. Cobalt API (для YouTube и всех соцсетей)
-        cobalt_res = await download_cobalt_universal(url, session)
-        if cobalt_res:
-            return cobalt_res
+        # YOUTUBE
+        if 'youtu' in url or 'youtube.com' in url:
+            # 1. Y2Mate Gateway
+            y2_res = await download_y2mate(url, session)
+            if y2_res:
+                return y2_res
 
-    # 3. Резервный yt-dlp с Android плеером
-    file_id = str(uuid.uuid4())
-    output_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
+            # 2. SSYouTube Gateway
+            ss_res = await download_ssyoutube(url, session)
+            if ss_res:
+                return ss_res
 
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': output_template,
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'concurrent_fragment_downloads': 5,
-        'buffersize': 1024 * 1024,
-        'retries': 3,
-        'fragment_retries': 3,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'mweb', 'web_creator'],
-                'player_skip': ['webpage', 'configs']
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'com.google.android.youtube/19.10.35 (Linux; U; Android 14; en_US) gzip',
-        }
-    }
-
-    loop = asyncio.get_event_loop()
-
-    def _download():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'Видео')
-            duration = info.get('duration', 0)
-
-            matched_files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{file_id}.*"))
-            if not matched_files:
-                raise FileNotFoundError("Не удалось найти файл после скачивания.")
-
-            initial_file = matched_files[0]
-            final_files = compress_or_split_video(initial_file)
-
-            return {
-                'files': final_files,
-                'title': title,
-                'duration': duration
-            }
-
-    return await loop.run_in_executor(executor, _download)
+    raise Exception("Не удалось скачать видео через облачные шлюзы. Попробуйте другую ссылку.")
