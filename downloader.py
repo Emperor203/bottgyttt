@@ -85,15 +85,64 @@ def compress_or_split_video(filepath: str) -> list[str]:
     return [filepath]
 
 def extract_youtube_id(url: str) -> str | None:
-    match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})', url)
-    if match:
-        return match.group(1)
+    """Точное извлечение 11-значного ID видео из любых ссылок YouTube"""
+    patterns = [
+        r'(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})',
+        r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/(?:watch\?v=|shorts\/|embed\/|v\/)([a-zA-Z0-9_-]{11})',
+        r'youtube\.com\/.*[?&]v=([a-zA-Z0-9_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+async def download_youtube_via_ddownr(video_id: str) -> dict | None:
+    """
+    Скачивание YouTube через шлюз Ddownr API (100% без капчи и авторизации)
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
+    connector = aiohttp.TCPConnector(ssl=False)
+    timeout = aiohttp.ClientTimeout(total=45)
+
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
+        try:
+            api_url = f"https://p.oceansaver.in/ajax/download.php?format=720&url=https://www.youtube.com/watch?v={video_id}&api=dfcb6d76f2f6a98d74dda51ad4ac634b"
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    task_id = data.get("id")
+                    title = data.get("title", "YouTube Video")
+
+                    # Опрашиваем статус готовности (обычно 1-2 секунды)
+                    for _ in range(15):
+                        await asyncio.sleep(1.5)
+                        progress_url = f"https://p.oceansaver.in/ajax/progress.php?id={task_id}"
+                        async with session.get(progress_url) as p_resp:
+                            if p_resp.status == 200:
+                                p_data = await p_resp.json()
+                                if p_data.get("progress") == 1000 and p_data.get("download_url"):
+                                    direct_download_url = p_data.get("download_url")
+                                    file_id = str(uuid.uuid4())
+                                    filepath = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
+
+                                    async with session.get(direct_download_url, timeout=aiohttp.ClientTimeout(total=60)) as v_resp:
+                                        if v_resp.status == 200:
+                                            async with aiofiles.open(filepath, 'wb') as f:
+                                                await f.write(await v_resp.read())
+                                            final_files = compress_or_split_video(filepath)
+                                            return {
+                                                'files': final_files,
+                                                'title': title,
+                                                'duration': 0
+                                            }
+        except Exception as e:
+            print(f"Ddownr API ошибка: {e}")
     return None
 
 async def download_youtube_via_invidious(video_id: str) -> dict | None:
-    """
-    Скачивание YouTube через сеть Invidious шлюзов (100% обход блокировок и Sign-in checks)
-    """
     instances = [
         "https://inv.tux.pizza",
         "https://invidious.nerdvpn.de",
@@ -117,7 +166,6 @@ async def download_youtube_via_invidious(video_id: str) -> dict | None:
                         title = data.get("title", "YouTube Video")
                         streams = data.get("formatStreams", [])
                         
-                        # Выбираем лучший доступный mp4 поток с видео и звуком
                         target_url = None
                         for s in streams:
                             if s.get("container") == "mp4":
@@ -183,9 +231,13 @@ async def download_media(url: str) -> dict:
         if result:
             return result
 
-    # 2. Если это YouTube — используем Invidious API
+    # 2. Если это YouTube — пробуем через шлюз Ddownr или Invidious
     yt_id = extract_youtube_id(url)
     if yt_id:
+        ddownr_res = await download_youtube_via_ddownr(yt_id)
+        if ddownr_res:
+            return ddownr_res
+
         invidious_result = await download_youtube_via_invidious(yt_id)
         if invidious_result:
             return invidious_result
