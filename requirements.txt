@@ -4,3 +4,4 @@ shazamio>=0.6.0
 python-dotenv>=1.0.1
 aiofiles>=23.2.1
 ytmusicapi>=1.7.0
+static-ffmpeg>=2.5
