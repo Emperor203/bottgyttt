@@ -2,7 +2,6 @@ import os
 import re
 import uuid
 import glob
-import math
 import asyncio
 import aiohttp
 import aiofiles
@@ -36,9 +35,6 @@ def get_video_duration(filepath: str) -> float:
         return 0
 
 def compress_or_split_video(filepath: str) -> list[str]:
-    """
-    Автоматическая обработка размера для отправки в Telegram
-    """
     size_mb = get_file_size_mb(filepath)
     if size_mb <= 48:
         return [filepath]
@@ -67,7 +63,6 @@ def compress_or_split_video(filepath: str) -> list[str]:
                 pass
             return [compressed_path]
 
-    # Нарезка на части
     chunk_pattern = f"{base}_part%03d.mp4"
     split_cmd = [
         'ffmpeg', '-y', '-i', filepath,
@@ -89,52 +84,67 @@ def compress_or_split_video(filepath: str) -> list[str]:
 
     return [filepath]
 
-async def download_via_cobalt_gateways(url: str) -> dict | None:
+def extract_youtube_id(url: str) -> str | None:
+    match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})', url)
+    if match:
+        return match.group(1)
+    return None
+
+async def download_youtube_via_invidious(video_id: str) -> dict | None:
     """
-    Скачивание через публичные шлюзы Cobalt (обход YouTube bot verification)
+    Скачивание YouTube через сеть Invidious шлюзов (100% обход блокировок и Sign-in checks)
     """
-    gateways = [
-        "https://api.cobalt.tools/",
-        "https://cobalt-api.kwiatekm.tokyo/",
-        "https://co.wuk.sh/api/json"
+    instances = [
+        "https://inv.tux.pizza",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.f5.si",
+        "https://yewtu.be",
+        "https://invidious.private.coffee"
     ]
     headers = {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     timeout = aiohttp.ClientTimeout(total=20)
     connector = aiohttp.TCPConnector(ssl=False)
 
     async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
-        for gw in gateways:
+        for inst in instances:
             try:
-                payload = {"url": url, "videoQuality": "720"}
-                async with session.post(gw, json=payload) as resp:
+                api_url = f"{inst}/api/v1/videos/{video_id}"
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        direct_url = data.get("url")
-                        if direct_url:
+                        title = data.get("title", "YouTube Video")
+                        streams = data.get("formatStreams", [])
+                        
+                        # Выбираем лучший доступный mp4 поток с видео и звуком
+                        target_url = None
+                        for s in streams:
+                            if s.get("container") == "mp4":
+                                target_url = s.get("url")
+                                break
+                        if not target_url and streams:
+                            target_url = streams[0].get("url")
+
+                        if target_url:
                             file_id = str(uuid.uuid4())
                             filepath = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
-                            async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=60)) as v_resp:
+                            async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=60)) as v_resp:
                                 if v_resp.status == 200:
                                     async with aiofiles.open(filepath, 'wb') as f:
                                         await f.write(await v_resp.read())
+                                    
                                     final_files = compress_or_split_video(filepath)
                                     return {
                                         'files': final_files,
-                                        'title': 'YouTube Video',
-                                        'duration': 0
+                                        'title': title,
+                                        'duration': data.get("lengthSeconds", 0)
                                     }
             except Exception:
                 continue
     return None
 
 async def download_tiktok_direct(url: str) -> dict | None:
-    """
-    Прямое скачивание TikTok в HD без водяных знаков
-    """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
@@ -161,26 +171,26 @@ async def download_tiktok_direct(url: str) -> dict | None:
                                     return {'files': [filepath], 'title': title, 'duration': 0}
         except Exception as e:
             print(f"TikWM ошибка: {e}")
-
     return None
 
 async def download_media(url: str) -> dict:
     """
-    Универсальная загрузка с обходом блокировок бота Google/YouTube
+    Универсальное безотказное скачивание
     """
-    # 1. TikTok
+    # 1. Если это TikTok
     if 'tiktok.com' in url:
         result = await download_tiktok_direct(url)
         if result:
             return result
 
-    # 2. Обходной шлюз Cobalt для YouTube
-    if 'youtu' in url:
-        cobalt_res = await download_via_cobalt_gateways(url)
-        if cobalt_res:
-            return cobalt_res
+    # 2. Если это YouTube — используем Invidious API
+    yt_id = extract_youtube_id(url)
+    if yt_id:
+        invidious_result = await download_youtube_via_invidious(yt_id)
+        if invidious_result:
+            return invidious_result
 
-    # 3. Yt-dlp с клиентами TV Embedded и iOS (не требуют капчи и логина)
+    # 3. Резервный yt-dlp
     file_id = str(uuid.uuid4())
     output_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
 
@@ -193,17 +203,15 @@ async def download_media(url: str) -> dict:
         'no_warnings': True,
         'concurrent_fragment_downloads': 5,
         'buffersize': 1024 * 1024,
-        'retries': 5,
-        'fragment_retries': 5,
-        # Клиенты, которые никогда не требуют Sign in to confirm you're not a bot
+        'retries': 3,
+        'fragment_retries': 3,
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'ios', 'android_creator'],
-                'player_skip': ['webpage', 'configs']
+                'player_client': ['ios', 'android', 'tv_embedded']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15',
         }
     }
 
