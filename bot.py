@@ -221,10 +221,25 @@ async def handle_audio_recognition(message: types.Message):
         except Exception:
             pass
 
+async def start_dummy_server():
+    port = os.getenv("PORT")
+    if port:
+        from aiohttp import web
+        app = web.Application()
+        app.router.add_get("/", lambda r: web.Response(text="Telegram Bot is alive! 🚀"))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(port))
+        await site.start()
+        print(f"🌍 Веб-сервер запущен на порту {port} (для Render)")
+
 async def main():
     if not BOT_TOKEN or BOT_TOKEN == "DUMMY_TOKEN":
         print("ОШИБКА: Пожалуйста, укажите BOT_TOKEN в файле .env!")
         return
+
+    # Запуск веб-порта для хостингов
+    await start_dummy_server()
 
     print("🚀 Топовый медиа-бот успешно запущен!")
     await dp.start_polling(bot)
