@@ -5,3 +5,4 @@ python-dotenv>=1.0.1
 aiofiles>=23.2.1
 ytmusicapi>=1.7.0
 static-ffmpeg>=2.5
+pytubefix>=6.16.0
