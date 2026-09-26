@@ -1,0 +1,23 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables & secrets
+.env
+
+# Media & Downloads
+downloads/
+*.mp4
+*.mp3
+*.ogg
+*.mkv
+*.webm
+
+# Logs
+*.log
