@@ -58,35 +58,44 @@ async def handle_text_messages(message: types.Message):
 
         try:
             data = await download_media(url)
-            filepath = data['filepath']
-            title = data['title']
+            files = data.get('files', [])
+            title = data.get('title', 'Видео')
 
-            if os.path.exists(filepath):
-                await bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
-                video_file = FSInputFile(filepath)
-                sent_msg = await message.reply_video(
-                    video=video_file,
-                    caption=f"🎬 **{title}**",
-                    supports_streaming=True,
-                    parse_mode="Markdown"
-                )
-                if sent_msg.video:
-                    media_cache[url] = sent_msg.video.file_id
-                
+            if files:
+                total_parts = len(files)
+                for index, filepath in enumerate(files, start=1):
+                    if os.path.exists(filepath):
+                        await bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
+                        video_file = FSInputFile(filepath)
+                        
+                        part_caption = f"🎬 **{title}**"
+                        if total_parts > 1:
+                            part_caption += f" *(Часть {index} из {total_parts})*"
+
+                        await message.reply_video(
+                            video=video_file,
+                            caption=part_caption,
+                            supports_streaming=True,
+                            parse_mode="Markdown"
+                        )
+                        try:
+                            os.remove(filepath)
+                        except Exception:
+                            pass
+
                 try:
-                    os.remove(filepath)
+                    await status_msg.delete()
                 except Exception:
                     pass
             else:
-                await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
+                await status_msg.edit_text("❌ Не удалось найти скачанный файл на сервере.")
         except Exception as e:
-            print(f"Ошибка загрузки видео ({url}): {e}")
-            await status_msg.edit_text("❌ Не удалось скачать видео (проверьте ссылку или размер до 50 МБ).")
-        finally:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
+            err_text = str(e)
+            print(f"Ошибка загрузки видео ({url}): {err_text}")
+            if "max_filesize" in err_text or "too large" in err_text.lower():
+                await status_msg.edit_text("❌ Видео слишком большое (превышает лимит 50 МБ Telegram).")
+            else:
+                await status_msg.edit_text(f"❌ Ошибка скачивания:\n`{err_text[:300]}`", parse_mode="Markdown")
 
     # --- 2. ЕСЛИ ОТПРАВЛЕН ТЕКСТ (ПОИСК МУЗЫКИ КАК В VKM6BOT) ---
     else:
